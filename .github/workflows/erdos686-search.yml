@@ -1,0 +1,79 @@
+name: Erdős 686 witness search
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        range:
+          - { first: 2, last: 16, max_n: 500000 }
+          - { first: 17, last: 32, max_n: 250000 }
+          - { first: 33, last: 64, max_n: 100000 }
+          - { first: 65, last: 128, max_n: 50000 }
+          - { first: 129, last: 256, max_n: 50000 }
+    env:
+      FIRST_K: ${{ matrix.range.first }}
+      LAST_K: ${{ matrix.range.last }}
+      MAX_N: ${{ matrix.range.max_n }}
+    steps:
+      - name: Search with exact integer arithmetic
+        run: |
+          python3 -u - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          def product(start, k):
+              return math.prod(range(start + 1, start + k + 1))
+
+          def search(ratio, k, max_n):
+              n, m = 0, k
+              left = ratio * product(n, k)
+              right = product(m, k)
+              while n <= max_n:
+                  if right < left or m < n + k:
+                      m += 1
+                      right = right // m * (m + k)
+                  elif right == left:
+                      assert m >= n + k
+                      assert product(m, k) == ratio * product(n, k)
+                      return dict(ratio=ratio, k=k, n=n, m=m)
+                  else:
+                      n += 1
+                      left = left // n * (n + k)
+              return None
+
+          assert search(9, 3, 11) == dict(ratio=9, k=3, n=11, m=25)
+          assert search(4, 2, 100) is None
+          first = int(os.environ["FIRST_K"])
+          last = int(os.environ["LAST_K"])
+          max_n = int(os.environ["MAX_N"])
+          report = dict(first_k=first, last_k=last, max_n=max_n, hits=[])
+          path = Path("erdos686-results.json")
+          for k in range(first, last + 1):
+              for ratio in (4, 25):
+                  hit = search(ratio, k, max_n)
+                  if hit:
+                      print("WITNESS", hit)
+                      report["hits"].append(hit)
+              if k == last or k % 8 == 0:
+                  print(f"Completed through k={k} for n <= {max_n}")
+              report["completed_through_k"] = k
+              path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+          PY
+
+      - name: Upload exact search report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: erdos686-k-${{ matrix.range.first }}-${{ matrix.range.last }}
+          path: erdos686-results.json
