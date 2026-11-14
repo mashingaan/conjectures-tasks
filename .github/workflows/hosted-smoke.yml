@@ -1,0 +1,145 @@
+name: Hosted Lean smoke search
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - name: Check out tasks
+        uses: actions/checkout@v4
+        with:
+          path: conjectures-tasks
+          fetch-depth: 1
+
+      - name: Check out validator
+        uses: actions/checkout@v4
+        with:
+          repository: conjectures-io/conjectures-validator
+          ref: main
+          path: conjectures-validator
+          fetch-depth: 1
+
+      - name: Bootstrap authoritative verifier
+        working-directory: conjectures-validator
+        run: ./scripts/bootstrap.sh --miner
+
+      - name: Try bounded tactics on compact targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/conjectures-validator/.venv/bin:$PWD/conjectures-validator/.elan/bin:$PATH"
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import urllib.request
+
+          root = pathlib.Path.cwd()
+          tasks_root = root / "conjectures-tasks" / "versions"
+          validator = root / "conjectures-validator"
+          api = json.load(urllib.request.urlopen("https://conjectures.io/v1/tasks"))
+          live = {item["task_id"]: item for item in api["tasks"]}
+          slugs = [
+              "erdos103",
+              "erdos151",
+              "erdos159",
+              "erdos295",
+              "erdos311",
+              "erdos322",
+              "erdos345",
+              "erdos388",
+              "erdos393",
+              "erdos422",
+              "erdos430",
+              "erdos461",
+              "erdos467",
+              "erdos472",
+              "erdos478",
+              "erdos483",
+              "erdos873",
+              "erdos897",
+              "erdos930",
+              "erdos931",
+              "erdos99",
+          ]
+          tactics = [
+              "by\n  simp",
+              "by\n  aesop",
+              "by\n  omega",
+              "by\n  norm_num",
+              "by\n  aesop (add safe (by omega))",
+          ]
+          alice = "5GrwvaEF5zXb26Fz9rcQpDWSxU7qgB6fZfW9D5QKqN8Yh8uQ"
+          hits = []
+          for task_id, item in live.items():
+              if not any(f"-{slug}-" in task_id for slug in slugs):
+                  continue
+              task_dir = tasks_root / task_id
+              if not task_dir.is_dir():
+                  print("SKIP missing", task_id, flush=True)
+                  continue
+              challenge = (task_dir / "Challenge.lean").read_text(encoding="utf-8")
+              start = challenge.index("theorem target")
+              declaration = challenge[start:]
+              declaration = declaration[:declaration.index("end Bounty")].strip()
+              for index, tactic in enumerate(tactics):
+                  proof = declaration.replace("by\n  sorry", tactic)
+                  proof_path = root / "Main.lean"
+                  proof_path.write_text(proof + "\n", encoding="utf-8")
+                  bundle = root / "submission.zip"
+                  build = [
+                      "python3",
+                      str(validator / "scripts" / "build_submission_bundle.py"),
+                      "--proof",
+                      str(proof_path),
+                      "--task-id",
+                      task_id,
+                      "--task-sha256",
+                      item["task_bundle_sha256"],
+                      "--coldkey",
+                      alice,
+                      "--output",
+                      str(bundle),
+                  ]
+                  made = subprocess.run(build, cwd=validator, text=True, capture_output=True)
+                  if made.returncode != 0:
+                      print("BUILD_FAIL", task_id, index, made.stderr[-500:], flush=True)
+                      continue
+                  verify = [
+                      "timeout",
+                      "90",
+                      "python3",
+                      "-m",
+                      "verifier",
+                      "bundle",
+                      "verify",
+                      "--bundle",
+                      str(bundle),
+                      "--task",
+                      str(task_dir),
+                  ]
+                  checked = subprocess.run(verify, cwd=validator, text=True, capture_output=True)
+                  combined = checked.stdout + checked.stderr
+                  accepted = checked.returncode == 0 and '"accepted": true' in combined.lower()
+                  print("RESULT", task_id, index, checked.returncode, accepted, combined[-1000:], flush=True)
+                  if accepted:
+                      hits.append({"task_id": task_id, "tactic": tactic, "proof": proof})
+                      break
+          report = root / "hosted-smoke-results.json"
+          report.write_text(json.dumps(hits, indent=2, ensure_ascii=False), encoding="utf-8")
+          print("HITS", json.dumps(hits, ensure_ascii=False), flush=True)
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-smoke-results
+          path: hosted-smoke-results.json
+          if-no-files-found: warn
