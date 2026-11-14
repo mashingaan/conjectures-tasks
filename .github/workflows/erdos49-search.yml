@@ -1,0 +1,117 @@
+name: Erdős 49 strict totient search
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Find a growing totient sequence longer than the primes
+        run: |
+          cat > search.go <<'GO'
+          package main
+
+          import (
+              "encoding/json"
+              "fmt"
+              "os"
+              "slices"
+          )
+
+          type Report struct {
+              CheckedThrough int `json:"checked_through"`
+              PrimeCount int `json:"prime_count"`
+              Witness []uint32 `json:"witness"`
+          }
+
+          func search(limit int) Report {
+              phi := make([]uint32, limit+1)
+              for n := range phi {
+                  phi[n] = uint32(n)
+              }
+              for p := range limit+1 {
+                  if p < 2 || phi[p] != uint32(p) {
+                      continue
+                  }
+                  m := p
+                  for m <= limit {
+                      phi[m] -= phi[m] / uint32(p)
+                      m += p
+                  }
+              }
+
+              tails := []uint32{}
+              ends := []uint32{}
+              predecessor := make([]uint32, limit+1)
+              primes := 0
+              for n := range limit+1 {
+                  if n == 0 {
+                      continue
+                  }
+                  value := phi[n]
+                  if n >= 2 && value == uint32(n-1) {
+                      primes++
+                  }
+                  pos, _ := slices.BinarySearch(tails, value)
+                  if pos > 0 {
+                      predecessor[n] = ends[pos-1]
+                  }
+                  if pos == len(tails) {
+                      tails = append(tails, value)
+                      ends = append(ends, uint32(n))
+                  } else {
+                      tails[pos] = value
+                      ends[pos] = uint32(n)
+                  }
+                  if n >= 2 && len(tails) > primes {
+                      witness := []uint32{}
+                      endpoint := uint32(n)
+                      for endpoint != 0 {
+                          witness = append(witness, endpoint)
+                          endpoint = predecessor[endpoint]
+                      }
+                      slices.Reverse(witness)
+                      if len(witness) != len(tails) {
+                          panic("incorrect witness size")
+                      }
+                      for i := range witness[1:] {
+                          a, b := witness[i], witness[i+1]
+                          if a >= b || phi[a] >= phi[b] {
+                              panic("invalid witness")
+                          }
+                      }
+                      return Report{n, primes, witness}
+                  }
+              }
+              return Report{limit, primes, nil}
+          }
+
+          func main() {
+              sanity := search(100)
+              if sanity.CheckedThrough == 100 && sanity.PrimeCount != 25 {
+                  panic("unexpected result through 100")
+              }
+              result := search(100_000_000)
+              fmt.Printf("Checked through N=%d, pi(N)=%d, witness length=%d\n", result.CheckedThrough, result.PrimeCount, len(result.Witness))
+              contents, err := json.Marshal(result)
+              if err != nil {
+                  panic(err)
+              }
+              err = os.WriteFile("erdos49-results.json", contents, 0644)
+              if err != nil {
+                  panic(err)
+              }
+          }
+          GO
+          go run search.go
+
+      - name: Upload search report
+        uses: actions/upload-artifact@v4
+        with:
+          name: erdos49-results
+          path: erdos49-results.json
