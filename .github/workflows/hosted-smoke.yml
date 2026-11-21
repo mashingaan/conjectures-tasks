@@ -91,7 +91,8 @@ jobs:
               "by\n  norm_num",
               "by\n  aesop (add safe (by omega))",
           ]
-          alice = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+          registry = json.loads((tasks_root.parent / "task-versions.json").read_text(encoding="utf-8"))
+          versions = {entry["task_id"]: entry for entry in registry["versions"]}
           hits = []
           attempted = 0
           report = root / "hosted-smoke-results.json"
@@ -102,6 +103,14 @@ jobs:
               if not task_dir.is_dir():
                   print("SKIP missing", task_id, flush=True)
                   continue
+              version = versions[task_id]
+              if version["task_bundle_sha256"] != digest:
+                  raise ValueError(f"Catalog digest mismatch for {task_id}")
+              provenance, = {
+                  admission["build_provenance_sha256"]
+                  for admission in version["admissions"]
+                  if admission["repository_commit"] == "6adcbe13652f4e7c69ad02a783465ae2a99d5cb3"
+              }
               challenge = (task_dir / "Challenge.lean").read_text(encoding="utf-8")
               target = re.search(r"(?ms)^theorem target\b.*?^  sorry\s*$", challenge)
               if not target:
@@ -112,39 +121,29 @@ jobs:
                   proof = declaration.replace("by\n  sorry", tactic)
                   proof_path = root / "Main.lean"
                   proof_path.write_text(proof + "\n", encoding="utf-8")
-                  bundle = root / f"{task_id}-{index}.zip"
-                  build = [
-                      "python3",
-                      str(validator / "scripts" / "build_submission_bundle.py"),
-                      "--proof",
-                      str(proof_path),
-                      "--task-id",
-                      task_id,
-                      "--task-sha256",
-                      digest,
-                      "--coldkey",
-                      alice,
-                      "--output",
-                      str(bundle),
-                  ]
-                  made = subprocess.run(build, cwd=validator, text=True, capture_output=True)
-                  if made.returncode != 0:
-                      raise RuntimeError(f"Bundle failed for {task_id}: {made.stderr}").with_traceback(None)
                   verify = [
                       "timeout",
                       "90",
                       "python3",
                       "-m",
                       "verifier",
-                      "bundle",
+
                       "verify",
                       "--allow-insecure-development",
-                      "--bundle",
-                      str(bundle),
+                      "--submission",
+                      str(proof_path),
+                      "--expected-task-sha256",
+                      digest,
+                      "--expected-build-provenance",
+                      provenance,
                       "--task",
                       str(task_dir),
                   ]
                   checked = subprocess.run(verify, cwd=validator, text=True, capture_output=True)
+                  if checked.returncode not in (0, 1, 2, 124):
+                      raise RuntimeError(checked.stdout + checked.stderr)
+                  if "ENVIRONMENT_MISMATCH" in checked.stdout or "TASK_COMMITMENT_MISMATCH" in checked.stdout:
+                      raise RuntimeError(checked.stdout + checked.stderr)
                   attempted += 1
                   combined = checked.stdout + checked.stderr
                   accepted = checked.returncode == 0 and '"accepted": true' in combined.lower()
